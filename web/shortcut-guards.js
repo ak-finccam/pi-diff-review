@@ -6,7 +6,8 @@ function isTypingTarget(target) {
     const isTypingElement = tagName === "INPUT" || tagName === "TEXTAREA" || isContentEditable;
     if (isTypingElement) {
       const insideMonaco = typeof node.closest === "function" && Boolean(node.closest(".monaco-editor"));
-      if (!insideMonaco) return true;
+      if (insideMonaco) return false;
+      return true;
     }
     node = node.parentNode;
   }

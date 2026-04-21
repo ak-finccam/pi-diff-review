@@ -5,13 +5,13 @@ import { dirname, join } from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, "shortcut-guards.js"), "utf8");
+const testDir = dirname(fileURLToPath(import.meta.url));
+const source = readFileSync(join(testDir, "shortcut-guards.js"), "utf8");
 const context = vm.createContext({ globalThis: {} });
 vm.runInContext(source, context);
 const { isTypingTarget } = context.globalThis.__reviewShortcutGuards;
 
-function makeNode({ tagName, isContentEditable = false, parentNode = null, insideMonaco = false } = {}) {
+function createMockNode({ tagName, isContentEditable = false, parentNode = null, insideMonaco = false } = {}) {
   return {
     tagName,
     isContentEditable,
@@ -23,23 +23,38 @@ function makeNode({ tagName, isContentEditable = false, parentNode = null, insid
   };
 }
 
-test("returns true for regular textarea targets", () => {
-  const textarea = makeNode({ tagName: "textarea" });
+test("returns true for regular textarea targets outside Monaco", () => {
+  const textarea = createMockNode({ tagName: "textarea" });
   assert.equal(isTypingTarget(textarea), true);
 });
 
 test("returns false for Monaco textarea targets", () => {
-  const textarea = makeNode({ tagName: "textarea", insideMonaco: true });
+  const textarea = createMockNode({ tagName: "textarea", insideMonaco: true });
   assert.equal(isTypingTarget(textarea), false);
 });
 
+test("treats tagName matching as case-insensitive", () => {
+  const textArea = createMockNode({ tagName: "TeXtArEa" });
+  assert.equal(isTypingTarget(textArea), true);
+});
+
 test("returns true when typing parent exists outside Monaco", () => {
-  const input = makeNode({ tagName: "input" });
-  const child = makeNode({ parentNode: input });
+  const input = createMockNode({ tagName: "input" });
+  const child = createMockNode({ parentNode: input });
   assert.equal(isTypingTarget(child), true);
 });
 
 test("returns false for non-typing targets", () => {
-  const div = makeNode({ tagName: "div" });
+  const div = createMockNode({ tagName: "div" });
   assert.equal(isTypingTarget(div), false);
+});
+
+test("returns true for contentEditable targets outside Monaco", () => {
+  const editable = createMockNode({ tagName: "div", isContentEditable: true });
+  assert.equal(isTypingTarget(editable), true);
+});
+
+test("returns false for contentEditable targets inside Monaco", () => {
+  const editable = createMockNode({ tagName: "div", isContentEditable: true, insideMonaco: true });
+  assert.equal(isTypingTarget(editable), false);
 });

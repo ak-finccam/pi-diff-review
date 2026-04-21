@@ -1057,6 +1057,14 @@ function isTypingTarget(target) {
   if (typeof guardFn === "function") {
     return guardFn(target);
   }
+  let node = target instanceof Node ? target : null;
+  while (node) {
+    if (node instanceof HTMLElement) {
+      const tag = node.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable) return true;
+    }
+    node = node.parentNode;
+  }
   return false;
 }
 
