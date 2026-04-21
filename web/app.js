@@ -984,10 +984,10 @@ function getSelectedCommentTarget() {
     { editor: diffEditor.getOriginalEditor(), side: "original" },
     { editor: diffEditor.getModifiedEditor(), side: "modified" },
   ];
-  const activeCandidate = candidates.find((candidate) => candidate.editor.hasTextFocus());
+  const activeCandidate = candidates.find((candidate) => candidate.editor.hasTextFocus() || candidate.editor.hasWidgetFocus());
   if (!activeCandidate || !canCommentOnSide(file, activeCandidate.side)) return null;
   const selection = activeCandidate.editor.getSelection();
-  const line = selection?.startLineNumber;
+  const line = selection?.startLineNumber ?? activeCandidate.editor.getPosition()?.lineNumber;
   if (!line) return null;
   return { ...activeCandidate, line };
 }
@@ -1253,7 +1253,7 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
   }
 });
 
-document.addEventListener("keydown", onGlobalKeydown);
+document.addEventListener("keydown", onGlobalKeydown, true);
 
 ensureActiveFileForScope();
 renderTree();
