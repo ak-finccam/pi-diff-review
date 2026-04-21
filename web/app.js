@@ -19,7 +19,25 @@ const state = {
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
+  hunkNavigationIndex: {},
 };
+
+const shortcutBindings = {
+  nextChange: ["j"],
+  previousChange: ["k"],
+  nextFile: ["J"],
+  previousFile: ["K"],
+  focusSidebarSearch: ["/"],
+  toggleSidebar: ["b"],
+  toggleReviewed: ["r"],
+  addLineComment: ["c"],
+  addOverallComment: ["C"],
+};
+
+const shortcutActionByKey = Object.entries(shortcutBindings).reduce((map, [actionId, keys]) => {
+  keys.forEach((key) => map.set(key, actionId));
+  return map;
+}, new Map());
 
 const sidebarEl = document.getElementById("sidebar");
 const sidebarTitleEl = document.getElementById("sidebar-title");
@@ -371,6 +389,22 @@ function openFile(fileId) {
   ensureFileLoaded(fileId, state.currentScope);
 }
 
+function getVisibleFilesInTreeOrder() {
+  return getFilteredFiles()
+    .slice()
+    .sort((a, b) => getFileSearchPath(a).localeCompare(getFileSearchPath(b)));
+}
+
+function openRelativeFile(direction) {
+  const visibleFiles = getVisibleFilesInTreeOrder();
+  if (visibleFiles.length === 0) return;
+  const currentIndex = visibleFiles.findIndex((file) => file.id === state.activeFileId);
+  const targetIndex = currentIndex < 0
+    ? (direction > 0 ? 0 : visibleFiles.length - 1)
+    : (currentIndex + direction + visibleFiles.length) % visibleFiles.length;
+  openFile(visibleFiles[targetIndex].id);
+}
+
 function renderTreeNode(node, depth) {
   const children = [...node.children.values()].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
@@ -626,6 +660,26 @@ function showFileCommentModal() {
   });
 }
 
+function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = collapsed;
+  updateSidebarLayout();
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function toggleSidebarCollapsed() {
+  setSidebarCollapsed(!state.sidebarCollapsed);
+}
+
+function toggleReviewedForActiveFile() {
+  const file = activeFile();
+  if (!file) return;
+  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
+  renderTree();
+}
+
 function layoutEditor() {
   if (!diffEditor) return;
   const width = editorContainerEl.clientWidth;
@@ -866,18 +920,7 @@ function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
-    state.comments.push({
-      id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-      fileId: file.id,
-      scope: state.currentScope,
-      side,
-      startLine: line,
-      endLine: line,
-      body: "",
-    });
-    updateCommentsUI();
+    addInlineCommentDraft(side, line);
     editor.revealLineInCenter(line);
   }
 
@@ -916,6 +959,121 @@ function createGlyphHoverActions(editor, side) {
       openDraftAtLine(line);
     }
   });
+}
+
+function addInlineCommentDraft(side, line) {
+  const file = activeFile();
+  if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
+  state.comments.push({
+    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    fileId: file.id,
+    scope: state.currentScope,
+    side,
+    startLine: line,
+    endLine: line,
+    body: "",
+  });
+  updateCommentsUI();
+}
+
+function getSelectedCommentTarget() {
+  if (!diffEditor) return null;
+  const file = activeFile();
+  if (!file || !isActiveFileReady()) return null;
+  const candidates = [
+    { editor: diffEditor.getOriginalEditor(), side: "original" },
+    { editor: diffEditor.getModifiedEditor(), side: "modified" },
+  ];
+  const activeCandidate = candidates.find((candidate) => candidate.editor.hasTextFocus());
+  if (!activeCandidate || !canCommentOnSide(file, activeCandidate.side)) return null;
+  const selection = activeCandidate.editor.getSelection();
+  const line = selection?.startLineNumber;
+  if (!line) return null;
+  return { ...activeCandidate, line };
+}
+
+function getHunkAnchors() {
+  if (!diffEditor || !activeFileShowsDiff()) return [];
+  const lineChanges = diffEditor.getLineChanges() || [];
+  return lineChanges
+    .map((change) => {
+      if (change.modifiedStartLineNumber > 0 && change.modifiedEndLineNumber > 0) {
+        return { side: "modified", line: change.modifiedStartLineNumber };
+      }
+      if (change.originalStartLineNumber > 0 && change.originalEndLineNumber > 0) {
+        return { side: "original", line: change.originalStartLineNumber };
+      }
+      return null;
+    })
+    .filter((anchor) => anchor != null);
+}
+
+function navigateChange(direction) {
+  const file = activeFile();
+  if (!file || !diffEditor) return;
+  const anchors = getHunkAnchors();
+  if (anchors.length === 0) return;
+  const key = cacheKey(state.currentScope, file.id);
+  let index = state.hunkNavigationIndex[key];
+  if (!Number.isInteger(index) || index < 0 || index >= anchors.length) {
+    index = direction > 0 ? -1 : anchors.length;
+  }
+  index = (index + direction + anchors.length) % anchors.length;
+  state.hunkNavigationIndex[key] = index;
+  const anchor = anchors[index];
+  const editor = anchor.side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+  editor.revealLineInCenter(anchor.line);
+}
+
+function focusSidebarSearch() {
+  if (state.sidebarCollapsed) {
+    setSidebarCollapsed(false);
+  }
+  sidebarSearchInputEl.focus();
+  sidebarSearchInputEl.select();
+}
+
+function addCommentFromSelection() {
+  const selectedTarget = getSelectedCommentTarget();
+  if (!selectedTarget) return;
+  addInlineCommentDraft(selectedTarget.side, selectedTarget.line);
+  selectedTarget.editor.revealLineInCenter(selectedTarget.line);
+}
+
+const shortcutActions = {
+  nextChange: () => navigateChange(1),
+  previousChange: () => navigateChange(-1),
+  nextFile: () => openRelativeFile(1),
+  previousFile: () => openRelativeFile(-1),
+  focusSidebarSearch,
+  toggleSidebar: toggleSidebarCollapsed,
+  toggleReviewed: toggleReviewedForActiveFile,
+  addLineComment: addCommentFromSelection,
+  addOverallComment: showOverallCommentModal,
+};
+
+function isTypingTarget(target) {
+  let node = target instanceof Node ? target : null;
+  while (node) {
+    if (node instanceof HTMLElement) {
+      const tag = node.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable) return true;
+    }
+    node = node.parentNode;
+  }
+  return false;
+}
+
+function onGlobalKeydown(event) {
+  if (event.defaultPrevented) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (isTypingTarget(event.target)) return;
+  const actionId = shortcutActionByKey.get(event.key);
+  if (!actionId) return;
+  const action = shortcutActions[actionId];
+  if (!action) return;
+  event.preventDefault();
+  action();
 }
 
 window.__reviewReceive = function (message) {
@@ -1063,10 +1221,7 @@ toggleWrapButton.addEventListener("click", () => {
 });
 
 toggleReviewedButton.addEventListener("click", () => {
-  const file = activeFile();
-  if (!file) return;
-  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
-  renderTree();
+  toggleReviewedForActiveFile();
 });
 
 scopeDiffButton.addEventListener("click", () => {
@@ -1082,12 +1237,7 @@ scopeAllButton.addEventListener("click", () => {
 });
 
 toggleSidebarButton.addEventListener("click", () => {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
-  updateSidebarLayout();
-  requestAnimationFrame(() => {
-    layoutEditor();
-    setTimeout(layoutEditor, 50);
-  });
+  toggleSidebarCollapsed();
 });
 
 sidebarSearchInputEl.addEventListener("input", () => {
@@ -1102,6 +1252,8 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
     renderTree();
   }
 });
+
+document.addEventListener("keydown", onGlobalKeydown);
 
 ensureActiveFileForScope();
 renderTree();
