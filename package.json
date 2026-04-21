@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "tsgo --noEmit",
+    "test": "node --test web/shortcut-guards.test.mjs",
     "prepare": "husky"
   },
   "pi": {
