@@ -34,8 +34,8 @@ test("returns false for Monaco textarea targets", () => {
 });
 
 test("treats tagName matching as case-insensitive", () => {
-  const textArea = createMockNode({ tagName: "TeXtArEa" });
-  assert.equal(isTypingTarget(textArea), true);
+  const textarea = createMockNode({ tagName: "TeXtArEa" });
+  assert.equal(isTypingTarget(textarea), true);
 });
 
 test("returns true when typing parent exists outside Monaco", () => {
