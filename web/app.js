@@ -24,36 +24,111 @@ const state = {
   hunkNavigationIndex: {},
 };
 
-const shortcutBindings = {
-  nextChange: ["j"],
-  previousChange: ["k"],
-  nextFile: ["J"],
-  previousFile: ["K"],
-  addLineComment: ["c"],
-  addOverallComment: ["C"],
-  focusSidebarSearch: ["/", "?"],
-  toggleSidebar: ["b", "B"],
-  toggleReviewed: ["r", "R"],
+const shortcutDefinitions = [
+  {
+    actionId: "nextChange",
+    description: "Jump to next change hunk",
+    helpLabel: "j",
+    bindings: [{ key: "j", code: "KeyJ", shift: false }],
+  },
+  {
+    actionId: "previousChange",
+    description: "Jump to previous change hunk",
+    helpLabel: "k",
+    bindings: [{ key: "k", code: "KeyK", shift: false }],
+  },
+  {
+    actionId: "nextFile",
+    description: "Open next file",
+    helpLabel: "J (Shift+j)",
+    bindings: [{ key: "J", code: "KeyJ", shift: true }],
+  },
+  {
+    actionId: "previousFile",
+    description: "Open previous file",
+    helpLabel: "K (Shift+k)",
+    bindings: [{ key: "K", code: "KeyK", shift: true }],
+  },
+  {
+    actionId: "addLineComment",
+    description: "Add inline comment at current line",
+    helpLabel: "c",
+    bindings: [{ key: "c", code: "KeyC", shift: false }],
+  },
+  {
+    actionId: "addOverallComment",
+    description: "Add overall review note",
+    helpLabel: "C (Shift+c)",
+    bindings: [{ key: "C", code: "KeyC", shift: true }],
+  },
+  {
+    actionId: "focusSidebarSearch",
+    description: "Focus sidebar file search",
+    helpLabel: "/ or ?",
+    bindings: [
+      { key: "/", code: "Slash", shift: false },
+      { key: "?", code: "Slash", shift: true },
+    ],
+  },
+  {
+    actionId: "toggleSidebar",
+    description: "Toggle sidebar",
+    helpLabel: "b or B",
+    bindings: [
+      { key: "b", code: "KeyB", shift: false },
+      { key: "B", code: "KeyB", shift: true },
+    ],
+  },
+  {
+    actionId: "toggleReviewed",
+    description: "Toggle reviewed state for current file",
+    helpLabel: "r or R",
+    bindings: [
+      { key: "r", code: "KeyR", shift: false },
+      { key: "R", code: "KeyR", shift: true },
+    ],
+  },
+];
+
+const monacoKeyCodeByEventCode = {
+  KeyJ: "KeyJ",
+  KeyK: "KeyK",
+  KeyC: "KeyC",
+  Slash: "Slash",
+  KeyB: "KeyB",
+  KeyR: "KeyR",
 };
 
-const shortcutActionByKey = Object.entries(shortcutBindings).reduce((map, [actionId, keys]) => {
-  keys.forEach((key) => {
-    map.set(key, actionId);
-  });
-  return map;
-}, new Map());
+const shortcutActionByKey = new Map();
+const shortcutActionByCode = new Map();
+const trackedShortcutCodes = new Set();
+const monacoShortcutBindings = [];
 
-const shortcutActionByCode = new Map([
-  ["KeyJ", { plain: "nextChange", shifted: "nextFile" }],
-  ["KeyK", { plain: "previousChange", shifted: "previousFile" }],
-  ["KeyC", { plain: "addLineComment", shifted: "addOverallComment" }],
-  ["KeyB", { plain: "toggleSidebar", shifted: "toggleSidebar" }],
-  ["KeyR", { plain: "toggleReviewed", shifted: "toggleReviewed" }],
-  ["Slash", { plain: "focusSidebarSearch", shifted: "focusSidebarSearch" }],
-]);
+shortcutDefinitions.forEach((definition) => {
+  definition.bindings.forEach((binding) => {
+    shortcutActionByKey.set(binding.key, definition.actionId);
+    trackedShortcutCodes.add(binding.code);
+
+    const codeBinding = shortcutActionByCode.get(binding.code) ?? { plain: null, shifted: null };
+    if (binding.shift) {
+      codeBinding.shifted = definition.actionId;
+    } else {
+      codeBinding.plain = definition.actionId;
+    }
+    shortcutActionByCode.set(binding.code, codeBinding);
+
+    const monacoKeyCode = monacoKeyCodeByEventCode[binding.code];
+    if (monacoKeyCode) {
+      monacoShortcutBindings.push({
+        actionId: definition.actionId,
+        keyCode: monacoKeyCode,
+        shift: binding.shift === true,
+      });
+    }
+  });
+});
 
 const shortcutDebugEnabled = reviewData.debugShortcuts === true;
-const trackedShortcutCodes = new Set(["KeyJ", "KeyK", "KeyC", "Slash", "KeyB", "KeyR"]);
 
 const rootLayoutEl = document.getElementById("root-layout");
 const sidebarEl = document.getElementById("sidebar");
@@ -757,6 +832,20 @@ function isShortcutsHelpModalOpen() {
   return shortcutsHelpBackdropEl != null;
 }
 
+function renderShortcutsHelpRows() {
+  return shortcutDefinitions
+    .map((definition, index) => {
+      const borderClass = index < shortcutDefinitions.length - 1 ? " border-b border-review-border" : "";
+      return `
+            <tr>
+              <td class="${borderClass} px-3 py-2 font-mono">${escapeHtml(definition.helpLabel)}</td>
+              <td class="${borderClass} px-3 py-2">${escapeHtml(definition.description)}</td>
+            </tr>
+      `;
+    })
+    .join("");
+}
+
 function closeShortcutsHelpModal(options = {}) {
   const backdrop = shortcutsHelpBackdropEl;
   if (!backdrop) return;
@@ -804,44 +893,7 @@ function showShortcutsHelpModal() {
               <th class="border-b border-review-border px-3 py-2 text-left font-semibold">Action</th>
             </tr>
           </thead>
-          <tbody class="bg-review-panel text-review-text">
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">j</td>
-              <td class="border-b border-review-border px-3 py-2">Jump to next change hunk</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">k</td>
-              <td class="border-b border-review-border px-3 py-2">Jump to previous change hunk</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">J (Shift+j)</td>
-              <td class="border-b border-review-border px-3 py-2">Open next file</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">K (Shift+k)</td>
-              <td class="border-b border-review-border px-3 py-2">Open previous file</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">c</td>
-              <td class="border-b border-review-border px-3 py-2">Add inline comment at current line</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">C (Shift+c)</td>
-              <td class="border-b border-review-border px-3 py-2">Add overall review note</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">/ or ?</td>
-              <td class="border-b border-review-border px-3 py-2">Focus sidebar file search</td>
-            </tr>
-            <tr>
-              <td class="border-b border-review-border px-3 py-2 font-mono">b or B</td>
-              <td class="border-b border-review-border px-3 py-2">Toggle sidebar</td>
-            </tr>
-            <tr>
-              <td class="px-3 py-2 font-mono">r or R</td>
-              <td class="px-3 py-2">Toggle reviewed state for current file</td>
-            </tr>
-          </tbody>
+          <tbody class="bg-review-panel text-review-text">${renderShortcutsHelpRows()}</tbody>
         </table>
       </div>
       <div class="mt-4 flex items-center justify-between gap-2">
