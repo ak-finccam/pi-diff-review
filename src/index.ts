@@ -259,6 +259,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(files, message);
+      if (prompt.length === 0) {
+        ctx.ui.notify("No feedback submitted; editor left unchanged.", "info");
+        return;
+      }
+
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted review feedback into the editor.", "info");
     } catch (error) {

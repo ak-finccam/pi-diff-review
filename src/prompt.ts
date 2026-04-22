@@ -36,21 +36,29 @@ function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined
 
 export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload): string {
   const fileMap = new Map(files.map((file) => [file.id, file]));
+  const overallComment = payload.overallComment.trim();
+  const comments = payload.comments
+    .map((comment) => ({ ...comment, body: comment.body.trim() }))
+    .filter((comment) => comment.body.length > 0);
+
+  if (overallComment.length === 0 && comments.length === 0) {
+    return "";
+  }
+
   const lines: string[] = [];
 
   lines.push("Please address the following feedback");
   lines.push("");
 
-  const overallComment = payload.overallComment.trim();
   if (overallComment.length > 0) {
     lines.push(overallComment);
     lines.push("");
   }
 
-  payload.comments.forEach((comment, index) => {
+  comments.forEach((comment, index) => {
     const file = fileMap.get(comment.fileId);
     lines.push(`${index + 1}. ${formatLocation(comment, file)}`);
-    lines.push(`   ${comment.body.trim()}`);
+    lines.push(`   ${comment.body}`);
     lines.push("");
   });
 
