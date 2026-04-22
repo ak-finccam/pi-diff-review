@@ -6,6 +6,7 @@
   "scripts": {
     "check": "tsgo --noEmit",
     "test": "node --test web/shortcut-guards.test.mjs",
+    "validate": "npm run check && npm run test",
     "prepare": "husky"
   },
   "pi": {

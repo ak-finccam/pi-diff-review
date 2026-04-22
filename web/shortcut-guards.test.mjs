@@ -11,11 +11,18 @@ const context = vm.createContext({ globalThis: {} });
 vm.runInContext(source, context);
 const { isTypingTarget } = context.globalThis.__reviewShortcutGuards;
 
-function createMockNode({ tagName, isContentEditable = false, parentNode = null, insideMonaco = false } = {}) {
+function createMockNode({ tagName, isContentEditable = false, parentNode = null, insideMonaco = false, dataCommentId = false } = {}) {
   return {
     tagName,
     isContentEditable,
     parentNode,
+    dataCommentId,
+    hasAttribute(name) {
+      return name === "data-comment-id" ? dataCommentId : false;
+    },
+    getAttribute(name) {
+      return name === "data-comment-id" && dataCommentId ? "comment-1" : null;
+    },
     closest(selector) {
       if (selector === ".monaco-editor" && insideMonaco) return {};
       return null;
@@ -28,9 +35,14 @@ test("returns true for regular textarea targets outside Monaco", () => {
   assert.equal(isTypingTarget(textarea), true);
 });
 
-test("returns false for Monaco textarea targets", () => {
+test("returns false for Monaco editor textarea targets", () => {
   const textarea = createMockNode({ tagName: "textarea", insideMonaco: true });
   assert.equal(isTypingTarget(textarea), false);
+});
+
+test("returns true for comment textarea targets inside Monaco", () => {
+  const textarea = createMockNode({ tagName: "textarea", insideMonaco: true, dataCommentId: true });
+  assert.equal(isTypingTarget(textarea), true);
 });
 
 test("treats tagName matching as case-insensitive", () => {

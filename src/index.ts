@@ -32,6 +32,13 @@ function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 }
 
+function shouldDebugShortcuts(): boolean {
+  const value = process.env.PI_DIFF_REVIEW_DEBUG_KEYS;
+  if (value == null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 export default function (pi: ExtensionAPI) {
   let activeWindow: GlimpseWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
@@ -117,13 +124,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
+    const { repoRoot, files, branchBaseRef, branchBaseRevision } = await getReviewWindowData(pi, ctx.cwd);
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
+    const debugShortcuts = shouldDebugShortcuts();
+    const html = buildReviewHtml({ repoRoot, files, branchBaseRef, debugShortcuts });
     const window = open(html, {
       width: 1680,
       height: 1020,
@@ -146,7 +154,7 @@ export default function (pi: ExtensionAPI) {
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, repoRoot, file, scope);
+      const pending = loadReviewFileContents(pi, repoRoot, file, scope, branchBaseRevision);
       contentCache.set(cacheKey, pending);
       return pending;
     };
@@ -210,6 +218,7 @@ export default function (pi: ExtensionAPI) {
 
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+
           if (isRequestFilePayload(message)) {
             void handleRequestFile(message);
             return;
@@ -275,7 +284,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native review window with git diff, last commit, and all files scopes",
+    description: "Open a native review window with git diff, branch diff, last commit, and all files scopes",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
     },
