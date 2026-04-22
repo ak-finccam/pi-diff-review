@@ -1561,21 +1561,16 @@ window.__reviewReceive = function (message) {
 function registerMonacoShortcutCommands() {
   if (!diffEditor || !monacoApi) return;
 
-  const bindings = [
-    { keybinding: monacoApi.KeyCode.KeyJ, actionId: "nextChange" },
-    { keybinding: monacoApi.KeyMod.Shift | monacoApi.KeyCode.KeyJ, actionId: "nextFile" },
-    { keybinding: monacoApi.KeyCode.KeyK, actionId: "previousChange" },
-    { keybinding: monacoApi.KeyMod.Shift | monacoApi.KeyCode.KeyK, actionId: "previousFile" },
-    { keybinding: monacoApi.KeyCode.KeyC, actionId: "addLineComment" },
-    { keybinding: monacoApi.KeyMod.Shift | monacoApi.KeyCode.KeyC, actionId: "addOverallComment" },
-    { keybinding: monacoApi.KeyCode.KeyB, actionId: "toggleSidebar" },
-    { keybinding: monacoApi.KeyCode.KeyR, actionId: "toggleReviewed" },
-    { keybinding: monacoApi.KeyCode.Slash, actionId: "focusSidebarSearch" },
-  ];
+  const resolvedBindings = monacoShortcutBindings.map((b) => ({
+    keybinding: b.shift
+      ? monacoApi.KeyMod.Shift | monacoApi.KeyCode[b.keyCode]
+      : monacoApi.KeyCode[b.keyCode],
+    actionId: b.actionId,
+  }));
 
   const editors = [diffEditor.getOriginalEditor(), diffEditor.getModifiedEditor()];
   editors.forEach((editor) => {
-    bindings.forEach((binding) => {
+    resolvedBindings.forEach((binding) => {
       editor.addCommand(binding.keybinding, () => {
         if (isShortcutsHelpModalOpen()) {
           if (shortcutDebugEnabled) {
@@ -1776,6 +1771,13 @@ if (rootLayoutEl) {
   rootLayoutEl.tabIndex = -1;
 }
 
+function isInteractiveTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest("button, a, input, select, textarea, [tabindex], [role]"),
+  );
+}
+
 document.addEventListener("pointerdown", (event) => {
   const target = event.target;
 
@@ -1783,7 +1785,7 @@ document.addEventListener("pointerdown", (event) => {
     return;
   }
 
-  if (isTypingTarget(target) || isMonacoTarget(target)) {
+  if (isTypingTarget(target) || isMonacoTarget(target) || isInteractiveTarget(target)) {
     return;
   }
 
@@ -1792,7 +1794,24 @@ document.addEventListener("pointerdown", (event) => {
   });
 }, true);
 
+function shouldFocusShortcutHostOnWindowFocus() {
+  if (isShortcutsHelpModalOpen()) {
+    return false;
+  }
+
+  const activeElement = document.activeElement;
+
+  if (!activeElement) {
+    return true;
+  }
+
+  return !isTypingTarget(activeElement) && !isMonacoTarget(activeElement);
+}
+
 window.addEventListener("focus", () => {
+  if (!shouldFocusShortcutHostOnWindowFocus()) {
+    return;
+  }
   focusShortcutHost();
 });
 
