@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -37,6 +40,58 @@ function shouldDebugShortcuts(): boolean {
   if (value == null) return false;
   const normalized = value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function openReviewWindow(html: string): { window: GlimpseWindow; cleanup: () => void } {
+  // WebView2 NavigateToString on Windows can throw ArgumentException for larger
+  // HTML payloads. The practical limit is brittle, so we always load from a
+  // temp file on Windows instead of relying on a size heuristic.
+  const shouldUseTempFile = process.platform === "win32";
+
+  if (!shouldUseTempFile) {
+    return {
+      window: open(html, {
+        width: 1680,
+        height: 1020,
+        title: "pi review",
+      }),
+      cleanup: () => {},
+    };
+  }
+
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-diff-review-"));
+  const tempFilePath = join(tempDir, "index.html");
+  writeFileSync(tempFilePath, html, "utf8");
+
+  const window = open("", {
+    width: 1680,
+    height: 1020,
+    title: "pi review",
+  });
+
+  let cleaned = false;
+  const handleReady = (): void => {
+    if (cleaned) return;
+    window.loadFile(tempFilePath);
+  };
+
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    window.removeListener("ready", handleReady);
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  };
+
+  window.once("closed", cleanup);
+  window.once("error", cleanup);
+
+  // Load after the host reports ready. Sending `file` too early on Windows can
+  // race host initialization and leave the default blank page in place.
+  window.once("ready", handleReady);
+
+  return { window, cleanup };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -132,11 +187,7 @@ export default function (pi: ExtensionAPI) {
 
     const debugShortcuts = shouldDebugShortcuts();
     const html = buildReviewHtml({ repoRoot, files, branchBaseRef, debugShortcuts });
-    const window = open(html, {
-      width: 1680,
-      height: 1020,
-      title: "pi review",
-    });
+    const { window, cleanup: cleanupWindowTempFiles } = openReviewWindow(html);
     activeWindow = window;
 
     const waitingUI = showWaitingUI(ctx);
@@ -280,6 +331,8 @@ export default function (pi: ExtensionAPI) {
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Review failed: ${message}`, "error");
+    } finally {
+      cleanupWindowTempFiles();
     }
   }
 
