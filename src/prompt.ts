@@ -3,6 +3,7 @@ import type { DiffReviewComment, ReviewFile, ReviewScope, ReviewSubmitPayload } 
 function formatScopeLabel(scope: ReviewScope): string {
   switch (scope) {
     case "git-diff": return "git diff";
+    case "branch-diff": return "branch diff";
     case "last-commit": return "last commit";
     default: return "all files";
   }
@@ -10,7 +11,13 @@ function formatScopeLabel(scope: ReviewScope): string {
 
 function getCommentFilePath(file: ReviewFile | undefined, scope: ReviewScope): string {
   if (file == null) return "(unknown file)";
-  const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : null;
+  const comparison = scope === "git-diff"
+    ? file.gitDiff
+    : scope === "branch-diff"
+      ? file.branchDiff
+      : scope === "last-commit"
+        ? file.lastCommit
+        : null;
   return comparison?.displayPath ?? file.path;
 }
 
@@ -36,21 +43,29 @@ function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined
 
 export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload): string {
   const fileMap = new Map(files.map((file) => [file.id, file]));
+  const overallComment = payload.overallComment.trim();
+  const comments = payload.comments
+    .map((comment) => ({ ...comment, body: comment.body.trim() }))
+    .filter((comment) => comment.body.length > 0);
+
+  if (overallComment.length === 0 && comments.length === 0) {
+    return "";
+  }
+
   const lines: string[] = [];
 
   lines.push("Please address the following feedback");
   lines.push("");
 
-  const overallComment = payload.overallComment.trim();
   if (overallComment.length > 0) {
     lines.push(overallComment);
     lines.push("");
   }
 
-  payload.comments.forEach((comment, index) => {
+  comments.forEach((comment, index) => {
     const file = fileMap.get(comment.fileId);
     lines.push(`${index + 1}. ${formatLocation(comment, file)}`);
-    lines.push(`   ${comment.body.trim()}`);
+    lines.push(`   ${comment.body}`);
     lines.push("");
   });
 

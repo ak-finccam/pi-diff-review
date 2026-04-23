@@ -10,6 +10,22 @@ Native diff review window for pi, powered by [Glimpse](https://github.com/hazat/
 pi install git:https://github.com/badlogic/pi-diff-review
 ```
 
+## Keyboard shortcuts
+
+These shortcuts work in the review window when you're not typing into an input/textarea.
+
+| Shortcut | What it does |
+| --- | --- |
+| `j` | Jump to next change hunk |
+| `k` | Jump to previous change hunk |
+| `J` (`Shift+j`) | Open next file |
+| `K` (`Shift+k`) | Open previous file |
+| `c` | Add inline comment at the current line |
+| `C` (`Shift+c`) | Add overall review note |
+| `/` or `?` | Focus sidebar file search |
+| `b` or `B` | Toggle sidebar |
+| `r` or `R` | Toggle reviewed state for current file |
+
 ## What it does
 
 Adds a `/diff-review` command to pi.

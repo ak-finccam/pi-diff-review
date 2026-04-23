@@ -12,9 +12,11 @@ function escapeForInlineScript(value: string): string {
 
 export function buildReviewHtml(data: ReviewWindowData): string {
   const templateHtml = readFileSync(join(webDir, "index.html"), "utf8");
+  const shortcutGuardsJs = readFileSync(join(webDir, "shortcut-guards.js"), "utf8");
   const appJs = readFileSync(join(webDir, "app.js"), "utf8");
+  const inlineJs = `${shortcutGuardsJs}\n${appJs}`;
   const payload = escapeForInlineScript(JSON.stringify(data));
   return templateHtml
     .replace("__INLINE_DATA__", payload)
-    .replace("__INLINE_JS__", appJs);
+    .replace("__INLINE_JS__", inlineJs);
 }

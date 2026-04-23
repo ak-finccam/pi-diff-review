@@ -1,9 +1,9 @@
 #!/bin/sh
 
-echo "Running TypeScript check..."
-npm run check
+echo "Running validation (typecheck + tests)..."
+npm run validate
 if [ $? -ne 0 ]; then
-  echo "Checks failed. Please fix the errors before committing."
+  echo "Validation failed. Please fix errors before committing."
   exit 1
 fi
 

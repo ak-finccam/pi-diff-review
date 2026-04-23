@@ -4,9 +4,11 @@ const state = {
   activeFileId: null,
   currentScope: reviewData.files.some((file) => file.inGitDiff)
     ? "git-diff"
-    : reviewData.files.some((file) => file.inLastCommit)
-      ? "last-commit"
-      : "all-files",
+    : reviewData.files.some((file) => file.inBranchDiff)
+      ? "branch-diff"
+      : reviewData.files.some((file) => file.inLastCommit)
+        ? "last-commit"
+        : "all-files",
   comments: [],
   overallComment: "",
   hideUnchanged: false,
@@ -19,13 +21,122 @@ const state = {
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
+  hunkNavigationIndex: {},
 };
 
+const shortcutDefinitions = [
+  {
+    actionId: "nextChange",
+    description: "Jump to next change hunk",
+    helpLabel: "j",
+    bindings: [{ key: "j", code: "KeyJ", shift: false }],
+  },
+  {
+    actionId: "previousChange",
+    description: "Jump to previous change hunk",
+    helpLabel: "k",
+    bindings: [{ key: "k", code: "KeyK", shift: false }],
+  },
+  {
+    actionId: "nextFile",
+    description: "Open next file",
+    helpLabel: "J (Shift+j)",
+    bindings: [{ key: "J", code: "KeyJ", shift: true }],
+  },
+  {
+    actionId: "previousFile",
+    description: "Open previous file",
+    helpLabel: "K (Shift+k)",
+    bindings: [{ key: "K", code: "KeyK", shift: true }],
+  },
+  {
+    actionId: "addLineComment",
+    description: "Add inline comment at current line",
+    helpLabel: "c",
+    bindings: [{ key: "c", code: "KeyC", shift: false }],
+  },
+  {
+    actionId: "addOverallComment",
+    description: "Add overall review note",
+    helpLabel: "C (Shift+c)",
+    bindings: [{ key: "C", code: "KeyC", shift: true }],
+  },
+  {
+    actionId: "focusSidebarSearch",
+    description: "Focus sidebar file search",
+    helpLabel: "/ or ?",
+    bindings: [
+      { key: "/", code: "Slash", shift: false },
+      { key: "?", code: "Slash", shift: true },
+    ],
+  },
+  {
+    actionId: "toggleSidebar",
+    description: "Toggle sidebar",
+    helpLabel: "b or B",
+    bindings: [
+      { key: "b", code: "KeyB", shift: false },
+      { key: "B", code: "KeyB", shift: true },
+    ],
+  },
+  {
+    actionId: "toggleReviewed",
+    description: "Toggle reviewed state for current file",
+    helpLabel: "r or R",
+    bindings: [
+      { key: "r", code: "KeyR", shift: false },
+      { key: "R", code: "KeyR", shift: true },
+    ],
+  },
+];
+
+const monacoKeyCodeByEventCode = {
+  KeyJ: "KeyJ",
+  KeyK: "KeyK",
+  KeyC: "KeyC",
+  Slash: "Slash",
+  KeyB: "KeyB",
+  KeyR: "KeyR",
+};
+
+const shortcutActionByKey = new Map();
+const shortcutActionByCode = new Map();
+const trackedShortcutCodes = new Set();
+const monacoShortcutBindings = [];
+
+shortcutDefinitions.forEach((definition) => {
+  definition.bindings.forEach((binding) => {
+    shortcutActionByKey.set(binding.key, definition.actionId);
+    trackedShortcutCodes.add(binding.code);
+
+    const codeBinding = shortcutActionByCode.get(binding.code) ?? { plain: null, shifted: null };
+    if (binding.shift) {
+      codeBinding.shifted = definition.actionId;
+    } else {
+      codeBinding.plain = definition.actionId;
+    }
+    shortcutActionByCode.set(binding.code, codeBinding);
+
+    const monacoKeyCode = monacoKeyCodeByEventCode[binding.code];
+    if (monacoKeyCode) {
+      monacoShortcutBindings.push({
+        actionId: definition.actionId,
+        keyCode: monacoKeyCode,
+        shift: binding.shift === true,
+      });
+    }
+  });
+});
+
+const shortcutDebugEnabled = reviewData.debugShortcuts === true;
+
+const rootLayoutEl = document.getElementById("root-layout");
 const sidebarEl = document.getElementById("sidebar");
 const sidebarTitleEl = document.getElementById("sidebar-title");
 const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
 const scopeDiffButton = document.getElementById("scope-diff-button");
+const scopeBranchButton = document.getElementById("scope-branch-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
 const scopeAllButton = document.getElementById("scope-all-button");
 const windowTitleEl = document.getElementById("window-title");
@@ -40,6 +151,7 @@ const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const fileCommentButton = document.getElementById("file-comment-button");
+const shortcutsHelpButton = document.getElementById("shortcuts-help-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
@@ -56,6 +168,11 @@ let modifiedDecorations = [];
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
+let shortcutDebugPanelEl = null;
+let shortcutDebugLines = [];
+let shortcutsHelpBackdropEl = null;
+let shortcutsHelpLastFocusedEl = null;
+const handledKeydownEvents = new WeakSet();
 
 function escapeHtml(value) {
   return String(value)
@@ -63,6 +180,63 @@ function escapeHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;");
+}
+
+function isMonacoTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest(".monaco-editor"));
+}
+
+function ensureShortcutDebugPanel() {
+  if (!shortcutDebugEnabled) return null;
+  if (shortcutDebugPanelEl != null) return shortcutDebugPanelEl;
+
+  const panel = document.createElement("div");
+  panel.id = "shortcut-debug-panel";
+  panel.style.position = "fixed";
+  panel.style.right = "12px";
+  panel.style.bottom = "12px";
+  panel.style.zIndex = "300";
+  panel.style.maxWidth = "720px";
+  panel.style.maxHeight = "240px";
+  panel.style.overflow = "auto";
+  panel.style.pointerEvents = "none";
+  panel.style.border = "1px solid #30363d";
+  panel.style.borderRadius = "8px";
+  panel.style.background = "rgba(1, 4, 9, 0.92)";
+  panel.style.padding = "8px 10px";
+  panel.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  panel.style.fontSize = "11px";
+  panel.style.lineHeight = "1.35";
+  panel.style.color = "#8b949e";
+  panel.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.45)";
+
+  document.body.appendChild(panel);
+  shortcutDebugPanelEl = panel;
+  return panel;
+}
+
+function pushShortcutDebugLine(line) {
+  if (!shortcutDebugEnabled) return;
+
+  const panel = ensureShortcutDebugPanel();
+  if (!panel) return;
+
+  shortcutDebugLines.push(`${new Date().toLocaleTimeString()} ${line}`);
+  if (shortcutDebugLines.length > 8) {
+    shortcutDebugLines = shortcutDebugLines.slice(-8);
+  }
+
+  panel.innerHTML = shortcutDebugLines.map((item) => escapeHtml(item)).join("<br>");
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function focusShortcutHost() {
+  if (isShortcutsHelpModalOpen()) return;
+  if (!rootLayoutEl) return;
+  if (typeof rootLayoutEl.focus !== "function") return;
+  if (document.activeElement === rootLayoutEl) return;
+  rootLayoutEl.focus({ preventScroll: true });
 }
 
 function inferLanguage(path) {
@@ -81,12 +255,14 @@ function inferLanguage(path) {
   if (lower.endsWith(".kt")) return "kotlin";
   if (lower.endsWith(".py")) return "python";
   if (lower.endsWith(".go")) return "go";
+  if (lower.endsWith(".r") || lower.endsWith(".rscript")) return "r";
   return "plaintext";
 }
 
 function scopeLabel(scope) {
   switch (scope) {
     case "git-diff": return "Git diff";
+    case "branch-diff": return "Branch diff";
     case "last-commit": return "Last commit";
     default: return "All files";
   }
@@ -96,6 +272,12 @@ function scopeHint(scope) {
   switch (scope) {
     case "git-diff":
       return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
+    case "branch-diff": {
+      const baseRef = typeof reviewData.branchBaseRef === "string" && reviewData.branchBaseRef.length > 0
+        ? reviewData.branchBaseRef
+        : "the inferred base branch";
+      return `Review all branch changes against merge-base with ${baseRef}. Hover or click line numbers in the gutter to add an inline comment.`;
+    }
     case "last-commit":
       return "Review the last commit against its parent. Hover or click line numbers in the gutter to add an inline comment.";
     default:
@@ -125,6 +307,8 @@ function getScopedFiles() {
   switch (state.currentScope) {
     case "git-diff":
       return reviewData.files.filter((file) => file.inGitDiff);
+    case "branch-diff":
+      return reviewData.files.filter((file) => file.inBranchDiff);
     case "last-commit":
       return reviewData.files.filter((file) => file.inLastCommit);
     default:
@@ -151,6 +335,7 @@ function activeFile() {
 function getScopeComparison(file, scope = state.currentScope) {
   if (!file) return null;
   if (scope === "git-diff") return file.gitDiff;
+  if (scope === "branch-diff") return file.branchDiff;
   if (scope === "last-commit") return file.lastCommit;
   return null;
 }
@@ -360,15 +545,68 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
   }
 }
 
-function openFile(fileId) {
+function openFile(fileId, options = {}) {
+  const shouldFocusEditor = options.focusEditor !== false;
+
   if (state.activeFileId === fileId) {
     ensureFileLoaded(fileId, state.currentScope);
+    if (shouldFocusEditor) {
+      requestMonacoFocusAfterFileSwitch("open-file:same");
+    }
     return;
   }
+
   saveCurrentScrollPosition();
   state.activeFileId = fileId;
-  renderAll({ restoreFileScroll: true });
+  renderAll({ restoreFileScroll: true, focusEditor: shouldFocusEditor });
   ensureFileLoaded(fileId, state.currentScope);
+
+  if (shouldFocusEditor) {
+    requestMonacoFocusAfterFileSwitch("open-file");
+  }
+}
+
+function collectVisibleTreeFiles(node, output) {
+  const children = [...node.children.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  for (const child of children) {
+    if (child.kind === "dir") {
+      const collapsed = state.collapsedDirs[child.path] === true;
+      if (!collapsed) {
+        collectVisibleTreeFiles(child, output);
+      }
+      continue;
+    }
+
+    if (child.file != null) {
+      output.push(child.file);
+    }
+  }
+}
+
+function getVisibleFilesInTreeOrder() {
+  const visibleFiles = getFilteredFiles();
+
+  if (state.fileFilter.trim()) {
+    return visibleFiles;
+  }
+
+  const output = [];
+  collectVisibleTreeFiles(buildTree(visibleFiles), output);
+  return output;
+}
+
+function openRelativeFile(direction) {
+  const visibleFiles = getVisibleFilesInTreeOrder();
+  if (visibleFiles.length === 0) return;
+  const currentIndex = visibleFiles.findIndex((file) => file.id === state.activeFileId);
+  const targetIndex = currentIndex < 0
+    ? (direction > 0 ? 0 : visibleFiles.length - 1)
+    : (currentIndex + direction + visibleFiles.length) % visibleFiles.length;
+  openFile(visibleFiles[targetIndex].id);
 }
 
 function renderTreeNode(node, depth) {
@@ -478,6 +716,7 @@ function updateSidebarLayout() {
 function updateScopeButtons() {
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
+    branch: reviewData.files.filter((file) => file.inBranchDiff).length,
     lastCommit: reviewData.files.filter((file) => file.inLastCommit).length,
     all: reviewData.files.filter((file) => file.hasWorkingTreeFile).length,
   };
@@ -492,10 +731,12 @@ function updateScopeButtons() {
   };
 
   scopeDiffButton.textContent = `Git diff${counts.diff > 0 ? ` (${counts.diff})` : ""}`;
+  scopeBranchButton.textContent = `Branch diff${counts.branch > 0 ? ` (${counts.branch})` : ""}`;
   scopeLastCommitButton.textContent = `Last commit${counts.lastCommit > 0 ? ` (${counts.lastCommit})` : ""}`;
   scopeAllButton.textContent = `All files${counts.all > 0 ? ` (${counts.all})` : ""}`;
 
   applyButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
+  applyButtonClasses(scopeBranchButton, state.currentScope === "branch-diff", counts.branch === 0);
   applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
   applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
 }
@@ -588,6 +829,96 @@ function showTextModal(options) {
   textarea.focus();
 }
 
+function isShortcutsHelpModalOpen() {
+  return shortcutsHelpBackdropEl != null;
+}
+
+function renderShortcutsHelpRows() {
+  return shortcutDefinitions
+    .map((definition, index) => {
+      const borderClass = index < shortcutDefinitions.length - 1 ? " border-b border-review-border" : "";
+      return `
+            <tr>
+              <td class="${borderClass} px-3 py-2 font-mono">${escapeHtml(definition.helpLabel)}</td>
+              <td class="${borderClass} px-3 py-2">${escapeHtml(definition.description)}</td>
+            </tr>
+      `;
+    })
+    .join("");
+}
+
+function closeShortcutsHelpModal(options = {}) {
+  const backdrop = shortcutsHelpBackdropEl;
+  if (!backdrop) return;
+
+  shortcutsHelpBackdropEl = null;
+  backdrop.remove();
+
+  const lastFocusedEl = shortcutsHelpLastFocusedEl;
+  shortcutsHelpLastFocusedEl = null;
+
+  const restoreFocus = options.restoreFocus !== false;
+  if (!restoreFocus) return;
+
+  if (lastFocusedEl && typeof lastFocusedEl.focus === "function") {
+    try {
+      lastFocusedEl.focus({ preventScroll: true });
+      return;
+    } catch {}
+  }
+
+  focusShortcutHost();
+}
+
+function showShortcutsHelpModal() {
+  if (isShortcutsHelpModalOpen()) return;
+
+  shortcutsHelpLastFocusedEl = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "review-modal-backdrop";
+  backdrop.setAttribute("role", "dialog");
+  backdrop.setAttribute("aria-modal", "true");
+  backdrop.setAttribute("aria-label", "Keyboard shortcuts");
+  backdrop.innerHTML = `
+    <div class="review-modal-card">
+      <div class="mb-2 text-base font-semibold text-white">Keyboard shortcuts</div>
+      <div class="mb-4 text-sm text-review-muted">Shortcuts are active while focus is in the review view (not in text inputs).</div>
+      <div class="overflow-hidden rounded-md border border-review-border">
+        <table class="w-full border-collapse text-sm">
+          <thead class="bg-[#0d1117] text-review-muted">
+            <tr>
+              <th class="border-b border-review-border px-3 py-2 text-left font-semibold">Shortcut</th>
+              <th class="border-b border-review-border px-3 py-2 text-left font-semibold">Action</th>
+            </tr>
+          </thead>
+          <tbody class="bg-review-panel text-review-text">${renderShortcutsHelpRows()}</tbody>
+        </table>
+      </div>
+      <div class="mt-4 flex items-center justify-between gap-2">
+        <div class="text-xs text-review-muted">Press <span class="rounded border border-review-border px-1 py-0.5 text-review-text">Esc</span> to close.</div>
+        <button id="shortcuts-help-close" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-4 py-2 text-sm font-medium text-review-text hover:bg-[#21262d]">Close</button>
+      </div>
+    </div>
+  `;
+
+  const close = () => closeShortcutsHelpModal();
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+
+  document.body.appendChild(backdrop);
+  shortcutsHelpBackdropEl = backdrop;
+
+  const closeButton = backdrop.querySelector("#shortcuts-help-close");
+  if (closeButton) {
+    closeButton.addEventListener("click", close);
+    closeButton.focus();
+  }
+}
+
 function showOverallCommentModal() {
   showTextModal({
     title: "Overall review note",
@@ -626,12 +957,65 @@ function showFileCommentModal() {
   });
 }
 
+function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = collapsed;
+  updateSidebarLayout();
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function toggleSidebarCollapsed() {
+  setSidebarCollapsed(!state.sidebarCollapsed);
+}
+
+function toggleReviewedForActiveFile() {
+  const file = activeFile();
+  if (!file) return;
+  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
+  renderTree();
+}
+
 function layoutEditor() {
   if (!diffEditor) return;
   const width = editorContainerEl.clientWidth;
   const height = editorContainerEl.clientHeight;
   if (width <= 0 || height <= 0) return;
   diffEditor.layout({ width, height });
+}
+
+function focusMonacoAfterFileSwitch() {
+  if (!diffEditor) return false;
+
+  const modifiedEditor = diffEditor.getModifiedEditor?.();
+  const originalEditor = diffEditor.getOriginalEditor?.();
+
+  try {
+    if (modifiedEditor && typeof modifiedEditor.focus === "function") {
+      modifiedEditor.focus();
+      return true;
+    }
+  } catch {}
+
+  try {
+    if (originalEditor && typeof originalEditor.focus === "function") {
+      originalEditor.focus();
+      return true;
+    }
+  } catch {}
+
+  return false;
+}
+
+function requestMonacoFocusAfterFileSwitch(_reason = "file-switch") {
+  const focusAttempt = () => {
+    focusMonacoAfterFileSwitch();
+  };
+
+  focusAttempt();
+  requestAnimationFrame(() => focusAttempt());
+  setTimeout(() => focusAttempt(), 40);
 }
 
 function clearViewZones() {
@@ -665,6 +1049,16 @@ function renderCommentDOM(comment, onDelete) {
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
+  });
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (textarea.value.trim().length > 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onDelete();
+    queueMicrotask(() => {
+      requestMonacoFocusAfterFileSwitch("delete-empty-comment");
+    });
   });
   container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
@@ -824,10 +1218,12 @@ function mountFile(options = {}) {
     layoutEditor();
     if (options.restoreFileScroll) restoreFileScrollPosition();
     if (options.preserveScroll) restoreScrollState(scrollState);
+    if (options.focusEditor) requestMonacoFocusAfterFileSwitch("mount-file");
     setTimeout(() => {
       layoutEditor();
       if (options.restoreFileScroll) restoreFileScrollPosition();
       if (options.preserveScroll) restoreScrollState(scrollState);
+      if (options.focusEditor) requestMonacoFocusAfterFileSwitch("mount-file:delayed");
     }, 50);
   });
 }
@@ -866,18 +1262,7 @@ function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
-    state.comments.push({
-      id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-      fileId: file.id,
-      scope: state.currentScope,
-      side,
-      startLine: line,
-      endLine: line,
-      body: "",
-    });
-    updateCommentsUI();
+    addInlineCommentDraft(side, line);
     editor.revealLineInCenter(line);
   }
 
@@ -918,6 +1303,234 @@ function createGlyphHoverActions(editor, side) {
   });
 }
 
+function addInlineCommentDraft(side, line) {
+  const file = activeFile();
+  if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
+  state.comments.push({
+    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    fileId: file.id,
+    scope: state.currentScope,
+    side,
+    startLine: line,
+    endLine: line,
+    body: "",
+  });
+  updateCommentsUI();
+}
+
+function getSelectedCommentTarget() {
+  if (!diffEditor) return null;
+  const file = activeFile();
+  if (!file || !isActiveFileReady()) return null;
+  const candidates = [
+    { editor: diffEditor.getOriginalEditor(), side: "original" },
+    { editor: diffEditor.getModifiedEditor(), side: "modified" },
+  ];
+  const activeCandidate = candidates.find((candidate) => candidate.editor.hasTextFocus() || candidate.editor.hasWidgetFocus());
+  if (!activeCandidate || !canCommentOnSide(file, activeCandidate.side)) return null;
+  const selection = activeCandidate.editor.getSelection();
+  const line = selection?.startLineNumber ?? activeCandidate.editor.getPosition()?.lineNumber;
+  if (!line) return null;
+  return { ...activeCandidate, line };
+}
+
+function getHunkAnchors() {
+  if (!diffEditor || !activeFileShowsDiff()) return [];
+  const lineChanges = diffEditor.getLineChanges() || [];
+  return lineChanges
+    .map((change) => {
+      if (change.modifiedStartLineNumber > 0 && change.modifiedEndLineNumber > 0) {
+        return { side: "modified", line: change.modifiedStartLineNumber };
+      }
+      if (change.originalStartLineNumber > 0 && change.originalEndLineNumber > 0) {
+        return { side: "original", line: change.originalStartLineNumber };
+      }
+      return null;
+    })
+    .filter((anchor) => anchor != null);
+}
+
+function moveCursorToChangeAnchor(editor, line) {
+  if (!editor) return;
+
+  const model = typeof editor.getModel === "function" ? editor.getModel() : null;
+  const lineCount = model && typeof model.getLineCount === "function" ? model.getLineCount() : 0;
+  const safeLine = lineCount > 0 ? Math.max(1, Math.min(line, lineCount)) : Math.max(1, line);
+
+  try {
+    editor.setPosition({ lineNumber: safeLine, column: 1 });
+  } catch {}
+
+  if (monacoApi?.Range) {
+    try {
+      editor.setSelection(new monacoApi.Range(safeLine, 1, safeLine, 1));
+    } catch {}
+  }
+
+  editor.revealLineInCenter(safeLine);
+
+  try {
+    editor.focus();
+  } catch {}
+}
+
+function navigateChange(direction) {
+  const file = activeFile();
+  if (!file || !diffEditor) return;
+  const anchors = getHunkAnchors();
+  if (anchors.length === 0) return;
+  const key = cacheKey(state.currentScope, file.id);
+  let index = state.hunkNavigationIndex[key];
+  if (!Number.isInteger(index) || index < 0 || index >= anchors.length) {
+    index = direction > 0 ? -1 : anchors.length;
+  }
+  index = (index + direction + anchors.length) % anchors.length;
+  state.hunkNavigationIndex[key] = index;
+  const anchor = anchors[index];
+  const editor = anchor.side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+  moveCursorToChangeAnchor(editor, anchor.line);
+}
+
+function focusSidebarSearch() {
+  if (state.sidebarCollapsed) {
+    setSidebarCollapsed(false);
+  }
+  sidebarSearchInputEl.focus();
+  sidebarSearchInputEl.select();
+}
+
+function addCommentFromSelection() {
+  const selectedTarget = getSelectedCommentTarget();
+  if (!selectedTarget) return;
+  addInlineCommentDraft(selectedTarget.side, selectedTarget.line);
+  selectedTarget.editor.revealLineInCenter(selectedTarget.line);
+}
+
+const shortcutActions = {
+  nextChange: () => navigateChange(1),
+  previousChange: () => navigateChange(-1),
+  nextFile: () => openRelativeFile(1),
+  previousFile: () => openRelativeFile(-1),
+  focusSidebarSearch,
+  toggleSidebar: toggleSidebarCollapsed,
+  toggleReviewed: toggleReviewedForActiveFile,
+  addLineComment: addCommentFromSelection,
+  addOverallComment: showOverallCommentModal,
+};
+
+function isTypingTarget(target) {
+  const guardFn = globalThis.__reviewShortcutGuards?.isTypingTarget;
+  if (typeof guardFn === "function" && guardFn !== isTypingTarget) {
+    try {
+      return guardFn(target);
+    } catch {
+      // Fall back to local detection.
+    }
+  }
+  let node = target instanceof Node ? target : null;
+  while (node) {
+    if (node instanceof HTMLElement) {
+      const tag = node.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable) return true;
+    }
+    node = node.parentNode;
+  }
+  return false;
+}
+
+function resolveShortcutAction(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return null;
+
+  const codeBinding = shortcutActionByCode.get(event.code);
+  if (codeBinding) {
+    return event.shiftKey ? codeBinding.shifted : codeBinding.plain;
+  }
+
+  return shortcutActionByKey.get(event.key) ?? null;
+}
+
+function describeShortcutTarget(target) {
+  if (!(target instanceof Element)) return null;
+  const tagName = target.tagName.toLowerCase();
+  const id = target.id ? `#${target.id}` : "";
+  const className = typeof target.className === "string" ? target.className.trim().split(/\s+/).slice(0, 2).join(".") : "";
+  const classSuffix = className ? `.${className}` : "";
+  return `${tagName}${id}${classSuffix}`;
+}
+
+function shouldTraceShortcutEvent(event) {
+  if (trackedShortcutCodes.has(event.code)) return true;
+  if (shortcutActionByKey.has(event.key)) return true;
+  return false;
+}
+
+function isTypingShortcutContext(event) {
+  if (isTypingTarget(event.target)) return true;
+  return isTypingTarget(document.activeElement);
+}
+
+function sendShortcutDebug(event, actionId, reason) {
+  if (!shortcutDebugEnabled) return;
+  if (!shouldTraceShortcutEvent(event)) return;
+
+  const line = [
+    `[shortcut] key=${event.key}`,
+    `code=${event.code}`,
+    `action=${actionId ?? "-"}`,
+    `reason=${reason ?? "-"}`,
+    `target=${describeShortcutTarget(event.target) ?? "-"}`,
+    `active=${describeShortcutTarget(document.activeElement) ?? "-"}`,
+  ].join(" ");
+  pushShortcutDebugLine(line);
+}
+
+function onGlobalKeydown(event) {
+  if (handledKeydownEvents.has(event)) return;
+  handledKeydownEvents.add(event);
+
+  const actionId = resolveShortcutAction(event);
+
+  if (isShortcutsHelpModalOpen()) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeShortcutsHelpModal();
+      sendShortcutDebug(event, actionId, "shortcuts-help-close");
+      return;
+    }
+
+    sendShortcutDebug(event, actionId, "shortcuts-help-open");
+    return;
+  }
+
+  if (!actionId) {
+    sendShortcutDebug(event, null, "no-action");
+    return;
+  }
+
+  if (isTypingShortcutContext(event)) {
+    sendShortcutDebug(event, actionId, "typing-target");
+    return;
+  }
+
+  const action = shortcutActions[actionId];
+  if (!action) {
+    sendShortcutDebug(event, actionId, "missing-handler");
+    return;
+  }
+
+  sendShortcutDebug(event, actionId, "invoke");
+  event.preventDefault();
+  event.stopPropagation();
+
+  try {
+    action();
+  } catch (error) {
+    sendShortcutDebug(event, actionId, "action-error");
+    console.error(`[diff-review] shortcut action failed: ${actionId}`, error);
+  }
+}
+
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
   const key = cacheKey(message.scope, message.fileId);
@@ -931,7 +1544,7 @@ window.__reviewReceive = function (message) {
     delete state.pendingRequestIds[key];
     renderTree();
     if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
-      mountFile({ restoreFileScroll: true });
+      mountFile({ restoreFileScroll: true, focusEditor: true });
     }
     return;
   }
@@ -941,10 +1554,49 @@ window.__reviewReceive = function (message) {
     delete state.pendingRequestIds[key];
     renderTree();
     if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
-      mountFile({ preserveScroll: false });
+      mountFile({ preserveScroll: false, focusEditor: true });
     }
   }
 };
+
+function registerMonacoShortcutCommands() {
+  if (!diffEditor || !monacoApi) return;
+
+  const resolvedBindings = monacoShortcutBindings.map((b) => ({
+    keybinding: b.shift
+      ? monacoApi.KeyMod.Shift | monacoApi.KeyCode[b.keyCode]
+      : monacoApi.KeyCode[b.keyCode],
+    actionId: b.actionId,
+  }));
+
+  const editors = [diffEditor.getOriginalEditor(), diffEditor.getModifiedEditor()];
+  editors.forEach((editor) => {
+    resolvedBindings.forEach((binding) => {
+      editor.addCommand(binding.keybinding, () => {
+        if (isShortcutsHelpModalOpen()) {
+          if (shortcutDebugEnabled) {
+            pushShortcutDebugLine(`[monaco-command] blocked action=${binding.actionId} reason=shortcuts-help-open`);
+          }
+          return;
+        }
+
+        if (isTypingTarget(document.activeElement)) {
+          if (shortcutDebugEnabled) {
+            pushShortcutDebugLine(`[monaco-command] blocked action=${binding.actionId} reason=typing-target`);
+          }
+          return;
+        }
+
+        if (shortcutDebugEnabled) {
+          pushShortcutDebugLine(`[monaco-command] action=${binding.actionId}`);
+        }
+        const action = shortcutActions[binding.actionId];
+        if (!action) return;
+        action();
+      }, "editorTextFocus");
+    });
+  });
+}
 
 function setupMonaco() {
   window.require.config({
@@ -987,6 +1639,7 @@ function setupMonaco() {
 
     createGlyphHoverActions(diffEditor.getOriginalEditor(), "original");
     createGlyphHoverActions(diffEditor.getModifiedEditor(), "modified");
+    registerMonacoShortcutCommands();
 
     if (typeof ResizeObserver !== "undefined") {
       editorResizeObserver = new ResizeObserver(() => {
@@ -1008,6 +1661,7 @@ function setupMonaco() {
 function switchScope(scope) {
   const hasScopeFiles = {
     "git-diff": reviewData.files.some((file) => file.inGitDiff),
+    "branch-diff": reviewData.files.some((file) => file.inBranchDiff),
     "last-commit": reviewData.files.some((file) => file.inLastCommit),
     "all-files": reviewData.files.some((file) => file.hasWorkingTreeFile),
   };
@@ -1045,6 +1699,10 @@ fileCommentButton.addEventListener("click", () => {
   showFileCommentModal();
 });
 
+shortcutsHelpButton.addEventListener("click", () => {
+  showShortcutsHelpModal();
+});
+
 toggleUnchangedButton.addEventListener("click", () => {
   state.hideUnchanged = !state.hideUnchanged;
   applyEditorOptions();
@@ -1063,14 +1721,15 @@ toggleWrapButton.addEventListener("click", () => {
 });
 
 toggleReviewedButton.addEventListener("click", () => {
-  const file = activeFile();
-  if (!file) return;
-  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
-  renderTree();
+  toggleReviewedForActiveFile();
 });
 
 scopeDiffButton.addEventListener("click", () => {
   switchScope("git-diff");
+});
+
+scopeBranchButton.addEventListener("click", () => {
+  switchScope("branch-diff");
 });
 
 scopeLastCommitButton.addEventListener("click", () => {
@@ -1082,12 +1741,7 @@ scopeAllButton.addEventListener("click", () => {
 });
 
 toggleSidebarButton.addEventListener("click", () => {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
-  updateSidebarLayout();
-  requestAnimationFrame(() => {
-    layoutEditor();
-    setTimeout(layoutEditor, 50);
-  });
+  toggleSidebarCollapsed();
 });
 
 sidebarSearchInputEl.addEventListener("input", () => {
@@ -1103,8 +1757,75 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
   }
 });
 
+[
+  window,
+  document,
+  document.body,
+  rootLayoutEl,
+].forEach((target) => {
+  if (target && typeof target.addEventListener === "function") {
+    target.addEventListener("keydown", onGlobalKeydown, true);
+  }
+});
+
+if (rootLayoutEl) {
+  rootLayoutEl.tabIndex = -1;
+}
+
+function isInteractiveTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest("button, a, input, select, textarea, [tabindex], [role]"),
+  );
+}
+
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+
+  if (isShortcutsHelpModalOpen()) {
+    return;
+  }
+
+  if (isTypingTarget(target) || isMonacoTarget(target) || isInteractiveTarget(target)) {
+    return;
+  }
+
+  queueMicrotask(() => {
+    focusShortcutHost();
+  });
+}, true);
+
+function shouldFocusShortcutHostOnWindowFocus() {
+  if (isShortcutsHelpModalOpen()) {
+    return false;
+  }
+
+  const activeElement = document.activeElement;
+
+  if (!activeElement) {
+    return true;
+  }
+
+  return !isTypingTarget(activeElement) && !isMonacoTarget(activeElement);
+}
+
+window.addEventListener("focus", () => {
+  if (!shouldFocusShortcutHostOnWindowFocus()) {
+    return;
+  }
+  focusShortcutHost();
+});
+
+if (shortcutDebugEnabled) {
+  ensureShortcutDebugPanel();
+  pushShortcutDebugLine("[shortcut] debug enabled");
+}
+
 ensureActiveFileForScope();
 renderTree();
 renderFileComments();
 updateSidebarLayout();
 setupMonaco();
+requestAnimationFrame(() => {
+  focusShortcutHost();
+});

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -30,6 +33,65 @@ type WaitingEditorResult = "escape" | "window-settled";
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function shouldDebugShortcuts(): boolean {
+  const value = process.env.PI_DIFF_REVIEW_DEBUG_KEYS;
+  if (value == null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function openReviewWindow(html: string): { window: GlimpseWindow; cleanup: () => void } {
+  // WebView2 NavigateToString on Windows can throw ArgumentException for larger
+  // HTML payloads. The practical limit is brittle, so we always load from a
+  // temp file on Windows instead of relying on a size heuristic.
+  const shouldUseTempFile = process.platform === "win32";
+
+  if (!shouldUseTempFile) {
+    return {
+      window: open(html, {
+        width: 1680,
+        height: 1020,
+        title: "pi review",
+      }),
+      cleanup: () => {},
+    };
+  }
+
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-diff-review-"));
+  const tempFilePath = join(tempDir, "index.html");
+  writeFileSync(tempFilePath, html, "utf8");
+
+  const window = open("", {
+    width: 1680,
+    height: 1020,
+    title: "pi review",
+  });
+
+  let cleaned = false;
+  const handleReady = (): void => {
+    if (cleaned) return;
+    window.loadFile(tempFilePath);
+  };
+
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    window.removeListener("ready", handleReady);
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  };
+
+  window.once("closed", cleanup);
+  window.once("error", cleanup);
+
+  // Load after the host reports ready. Sending `file` too early on Windows can
+  // race host initialization and leave the default blank page in place.
+  window.once("ready", handleReady);
+
+  return { window, cleanup };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -117,18 +179,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
+    const { repoRoot, files, branchBaseRef, branchBaseRevision } = await getReviewWindowData(pi, ctx.cwd);
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
-    const window = open(html, {
-      width: 1680,
-      height: 1020,
-      title: "pi review",
-    });
+    const debugShortcuts = shouldDebugShortcuts();
+    const html = buildReviewHtml({ repoRoot, files, branchBaseRef, debugShortcuts });
+    const { window, cleanup: cleanupWindowTempFiles } = openReviewWindow(html);
     activeWindow = window;
 
     const waitingUI = showWaitingUI(ctx);
@@ -146,7 +205,7 @@ export default function (pi: ExtensionAPI) {
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, repoRoot, file, scope);
+      const pending = loadReviewFileContents(pi, repoRoot, file, scope, branchBaseRevision);
       contentCache.set(cacheKey, pending);
       return pending;
     };
@@ -210,6 +269,7 @@ export default function (pi: ExtensionAPI) {
 
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+
           if (isRequestFilePayload(message)) {
             void handleRequestFile(message);
             return;
@@ -259,6 +319,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(files, message);
+      if (prompt.length === 0) {
+        ctx.ui.notify("No feedback submitted; editor left unchanged.", "info");
+        return;
+      }
+
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted review feedback into the editor.", "info");
     } catch (error) {
@@ -266,11 +331,13 @@ export default function (pi: ExtensionAPI) {
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Review failed: ${message}`, "error");
+    } finally {
+      cleanupWindowTempFiles();
     }
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native review window with git diff, last commit, and all files scopes",
+    description: "Open a native review window with git diff, branch diff, last commit, and all files scopes",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
     },
