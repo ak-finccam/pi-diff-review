@@ -255,6 +255,7 @@ function inferLanguage(path) {
   if (lower.endsWith(".kt")) return "kotlin";
   if (lower.endsWith(".py")) return "python";
   if (lower.endsWith(".go")) return "go";
+  if (lower.endsWith(".r") || lower.endsWith(".rscript")) return "r";
   return "plaintext";
 }
 
