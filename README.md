@@ -53,3 +53,5 @@ Glimpse now supports Windows. To build the native host during install you need:
 
 - .NET 8 SDK
 - Microsoft Edge WebView2 Runtime
+
+<!-- copilot cloud agent smoke test -->
